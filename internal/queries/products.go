@@ -360,6 +360,79 @@ func (q *ProductQueries) ProductImages(ctx context.Context, id string) (*[]model
 	return &images, nil
 }
 
+// DeleteImage handles the deletion of a product image.
+func (q *ProductQueries) DeleteImage(ctx context.Context, productID, imageID string) error {
+	// Get image info and delete from database
+	imageInfo, err := q.deleteImageRecord(ctx, productID, imageID)
+	if err != nil {
+		return fmt.Errorf("deleting image record: %w", err)
+	}
+
+	// Delete physical files
+	if err := q.deleteImageFiles(imageInfo.name, imageInfo.ext); err != nil {
+		return fmt.Errorf("deleting image files: %w", err)
+	}
+
+	return nil
+}
+
+type imageInfo struct {
+	name string
+	ext  string
+}
+
+func (q *ProductQueries) deleteImageRecord(ctx context.Context, productID, imageID string) (*imageInfo, error) {
+	tx, err := q.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	// Get image info before deletion
+	info := &imageInfo{}
+	err = tx.QueryRowContext(ctx,
+		`SELECT name, ext FROM product_image WHERE id = ?`,
+		imageID).Scan(&info.name, &info.ext)
+	if err != nil {
+		return nil, err
+	}
+
+	// Delete the database record
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM product_image WHERE id = ? AND product_id = ?`,
+		imageID, productID); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return info, nil
+}
+
+func (q *ProductQueries) deleteImageFiles(name, ext string) error {
+	filePaths := []string{
+		fmt.Sprintf("./lc_uploads/%s.%s", name, ext),
+		fmt.Sprintf("./lc_uploads/%s_sm.%s", name, ext),
+	}
+
+	var removeErrors []string
+	for _, filePath := range filePaths {
+		if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+			removeErrors = append(removeErrors,
+				fmt.Sprintf("failed to remove %s: %v", filePath, err))
+		}
+	}
+
+	if len(removeErrors) > 0 {
+		return fmt.Errorf("file deletion errors: %s",
+			strings.Join(removeErrors, "; "))
+	}
+
+	return nil
+}
+
 // AddImage attaches an image to a product by inserting a new record in the product_image table.
 func (q *ProductQueries) AddImage(ctx context.Context, productID, fileUUID, fileExt, origName string) (*models.File, error) {
 	file := &models.File{
@@ -375,51 +448,6 @@ func (q *ProductQueries) AddImage(ctx context.Context, productID, fileUUID, file
 	}
 
 	return file, nil
-}
-
-// DeleteImage handles the deletion of a product image.
-func (q *ProductQueries) DeleteImage(ctx context.Context, productID, imageID string) error {
-	tx, err := q.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	var name, ext string
-	err = tx.QueryRowContext(ctx, `SELECT name, ext FROM product_image WHERE id = ?`, imageID).Scan(&name, &ext)
-	if err != nil {
-		return err
-	}
-
-	if _, err := tx.ExecContext(ctx, `DELETE FROM product_image WHERE id = ? AND product_id = ?`, imageID, productID); err != nil {
-		return err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-
-	filePaths := []string{
-		fmt.Sprintf("./lc_uploads/%s.%s", name, ext),
-		fmt.Sprintf("./lc_uploads/%s_sm.%s", name, ext),
-	}
-
-	var removeErrors []error
-	for _, filePath := range filePaths {
-		if err := os.Remove(filePath); err != nil {
-			removeErrors = append(removeErrors, fmt.Errorf("failed to remove file %s: %w", filePath, err))
-		}
-	}
-
-	if len(removeErrors) > 0 {
-		var combinedError error
-		for _, err := range removeErrors {
-			combinedError = fmt.Errorf("%v; %w", combinedError, err)
-		}
-		return fmt.Errorf("one or more files could not be removed: %w", combinedError)
-	}
-
-	return nil
 }
 
 // ProductDigital retrieves the digital content associated with a given product ID.
